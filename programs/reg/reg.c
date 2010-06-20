@@ -411,13 +411,143 @@ static LONG hkey_to_wstring(HKEY hkey, WCHAR *buf, DWORD buf_sz)
     return -2;
 }
 
+typedef struct {
+    WCHAR *s;
+    DWORD sz;
+    DWORD base_sz;
+} DisplayString; 
+
+static int create_base_string(DisplayString *display,
+        HKEY root, WCHAR *remain,
+        WCHAR *value)
+{
+    WCHAR *ret, *pret;
+    WCHAR root_str[255];
+    LONG st;
+    DWORD ret_sz;
+
+    st = hkey_to_wstring(root, root_str, sizeof(root_str));
+    if (st) {
+        return -1;
+    }
+
+    display->base_sz = strlenW(root_str) + 1 + strlenW(remain) + 1;
+
+    ret_sz = display->base_sz + strlenW(value) + 1;
+    ret = malloc(ret_sz * sizeof(*ret));
+    if (ret == NULL) {
+        return -1;
+    }
+    display->s = ret;
+    display->sz = ret_sz;
+
+    pret = ret;
+    memcpy(ret, root_str,
+           sizeof(*ret) * strlenW(root_str));
+    pret += strlenW(root_str);
+
+    pret[0] = '\\';
+    pret += 1;
+    memcpy(pret, remain, strlenW(remain) * sizeof(*remain));
+    pret += strlenW(remain);
+
+    pret[0] = '\\';
+    pret += 1;
+    memcpy(pret, value, strlenW(value) * sizeof(*value));
+    pret += strlenW(value);
+    pret[0] = '\0';
+
+    return 0;
+}
+
+static int resize_display(DisplayString *display, WCHAR* skey)
+{
+    DWORD skey_sz = strlenW(skey);
+    WCHAR *pdisplay;
+
+    if(display->sz < (display->base_sz + skey_sz)) {
+        display->sz = display->base_sz + skey_sz;
+        display->s = realloc(display->s, sizeof(*display->s) * display->sz);
+        if(display->s == NULL) {
+            return -1;
+        }
+    }
+    pdisplay = display->s + display->base_sz;
+    memcpy(pdisplay, skey, skey_sz * sizeof(*skey));
+    pdisplay[skey_sz] = '\0';
+
+    return 0;
+}
+
 static int reg_query(WCHAR *key_name, WCHAR *value_name, BOOL value_empty,
     BOOL subkey)
 {
-    static const WCHAR stubW[] = {'S','T','U','B',' ','Q','U','E','R','Y',' ',
-        '-',' ','%','s',' ','%','s',' ','%','d',' ','%','d','\n',0};
-    reg_printfW(stubW, key_name, value_name, value_empty, subkey);
+    static const WCHAR ff[] = {'%', 's', '\n', 0};
+    static WCHAR empty_line[] = {'\n', 0};
+    static WCHAR not_implemented[] = {'S', 'u', 'p', 'p', 'o', 'r', 't', ' ',
+	    'f', 'o', 'r', ' ', 'v', 'a', 'l', 'u', 'e', ' ', 'n', 'o', 't',
+	    ' ', 'i', 'm', 'p', 'l', 'e', 'm', 'e', 'n', 't', 'e', 'd', ' ',
+	    'y', 'e', 't', '\n', 0};
+    HKEY root;
+    HKEY hkey;
+    LONG st;
+    WCHAR *p;
+    WCHAR skey[255];
+    DWORD skey_sz = sizeof(skey);
+    DisplayString display;
 
+    if (value_name != NULL) {
+        reg_printfW(not_implemented);
+        return 1;
+    }
+
+    p = strchrW(key_name, '\\');
+    root = get_rootkey(key_name);
+    if (root == NULL) {
+        reg_message(STRING_INVALID_KEY);
+        return 1;
+    }
+    p += 1;
+
+    st = RegOpenKeyExW(root, p, 0, KEY_READ, &hkey);
+    if (st == ERROR_SUCCESS) {
+        int i = 0;
+        st = RegEnumKeyExW(hkey, i, skey, &skey_sz, NULL,
+                NULL, NULL, NULL);
+
+        if(create_base_string(&display, root, p, skey)) {
+            goto close_key;
+        }
+
+        if (st == ERROR_SUCCESS) {
+            reg_printfW(empty_line);
+            do {
+                reg_printfW(ff, display.s);
+
+                i += 1;
+                skey_sz = 255;
+                st = RegEnumKeyExW(hkey, i, skey, &skey_sz, NULL,
+                        NULL, NULL, NULL);
+                if (resize_display(&display, skey)) {
+                    goto clean_display;
+                }
+
+            } while(st != ERROR_NO_MORE_ITEMS);
+        } else {
+            goto clean_display;
+        }
+    } else {
+        return 1;
+    }
+    free(display.s);
+    RegCloseKey(hkey);
+
+    return 0;
+
+clean_display:
+    free(display.s);
+close_key:
+    RegCloseKey(hkey);
     return 1;
 }
 
