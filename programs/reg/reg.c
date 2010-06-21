@@ -415,11 +415,11 @@ typedef struct {
     WCHAR *s;
     DWORD sz;
     DWORD base_sz;
-} DisplayString; 
+} DisplayString;
 
 static int create_base_string(DisplayString *display,
         HKEY root, WCHAR *remain,
-        WCHAR *value)
+        DWORD max_value_size)
 {
     WCHAR *ret, *pret;
     WCHAR root_str[255];
@@ -433,7 +433,7 @@ static int create_base_string(DisplayString *display,
 
     display->base_sz = strlenW(root_str) + 1 + strlenW(remain) + 1;
 
-    ret_sz = display->base_sz + strlenW(value) + 1;
+    ret_sz = display->base_sz + max_value_size + 1;
     ret = malloc(ret_sz * sizeof(*ret));
     if (ret == NULL) {
         return -1;
@@ -452,10 +452,6 @@ static int create_base_string(DisplayString *display,
     pret += strlenW(remain);
 
     pret[0] = '\\';
-    pret += 1;
-    memcpy(pret, value, strlenW(value) * sizeof(*value));
-    pret += strlenW(value);
-    pret[0] = '\0';
 
     return 0;
 }
@@ -479,11 +475,132 @@ static int resize_display(DisplayString *display, WCHAR* skey)
     return 0;
 }
 
+const static WCHAR reg_type_str[][20] = {
+    {NULL},
+    {'R', 'E', 'G', '_', 'S', 'Z', 0}
+};
+
+static int print_key_value(const HKEY hkey, const WCHAR* skey)
+{
+    static const WCHAR tabbed_ff[] = {' ', ' ', ' ', ' ', '%', 's',
+                                      ' ', ' ', ' ', ' ', '%', 's',
+                                      ' ', ' ', ' ', ' ', '%', 's',
+                                      '\n', 0};
+    DWORD type;
+    BYTE data[256];
+    DWORD data_sz = 256, wdata_sz;
+    WCHAR *data_as_wstr;
+    DWORD st;
+
+    wdata_sz = data_sz;
+    st = RegQueryValueExW(hkey, skey, NULL, &type, data, &wdata_sz);
+    if (st != ERROR_SUCCESS) {
+        return st;
+    }
+
+    data[wdata_sz] = '\0';
+    data_as_wstr = (WCHAR*)data;
+    if (type < sizeof(reg_type_str)) {
+        reg_printfW(tabbed_ff, skey, reg_type_str[type], data_as_wstr);
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+static int print_skeys(HKEY root, WCHAR *p, const HKEY hkey)
+{
+    DWORD st;
+    int i = 0;
+    DWORD nskeys, nvalues;
+    DWORD max_skey_sz, max_value_sz, max_value_data_sz, buf_sz;
+    WCHAR *skey;
+    DWORD skey_sz;
+    DisplayString display;
+
+    static WCHAR empty_line[] = {'\n', 0};
+    static const WCHAR ff[] = {'%', 's', '\n', 0};
+
+    st = RegQueryInfoKeyW(
+        hkey,                    // key handle
+        NULL,                    // buffer for class name
+        NULL,                    // size of class string
+        NULL,                    // reserved
+        &nskeys,                 // number of subkeys
+        &max_skey_sz,            // longest subkey size
+        NULL,                    // longest class string
+        &nvalues,                // number of values for this key
+        &max_value_sz,           // longest value name
+        &max_value_data_sz,      // longest value data
+        NULL,                    // security descriptor
+        NULL);                   // last write time
+ 
+    if (st != ERROR_SUCCESS) {
+        return st;
+    }
+
+    buf_sz = (max_value_sz > max_skey_sz) ? max_value_sz :
+                                            max_skey_sz;
+    buf_sz += 1;
+    skey = malloc(sizeof(*skey) * buf_sz);
+    if (skey==NULL) {
+        return 1;
+    }
+    reg_printfW(empty_line);
+
+    if(create_base_string(&display, root, p, max_value_sz)) {
+        goto clean_skey;
+    }
+
+    display.s[display.base_sz-1] = '\0';
+    if (nvalues > 0) {
+        reg_printfW(ff, display.s);
+    }
+    display.s[display.base_sz-1] = '\\';
+
+    for (i = 0; i < nvalues; ++i) {
+        skey_sz = buf_sz;
+        skey[0] = '\0';
+        st = RegEnumValueW(hkey, i, skey, &skey_sz, NULL,
+                NULL, NULL, NULL);
+        if (st != ERROR_SUCCESS) {
+            goto clean_display;
+        }
+
+        st = print_key_value(hkey, skey);
+        if (st) {
+            goto clean_display;
+        }
+    }
+
+    reg_printfW(empty_line);
+    for (i = 0; i < nskeys; ++i) {
+        skey_sz = buf_sz;
+        st = RegEnumKeyExW(hkey, i, skey, &skey_sz, NULL,
+                NULL, NULL, NULL);
+        if (st != ERROR_SUCCESS) {
+            goto clean_display;
+        }
+        memcpy(display.s + display.base_sz, skey, skey_sz * sizeof(*skey));
+        display.s[display.base_sz + skey_sz] = '\0';
+        reg_printfW(ff, display.s);
+    }
+    free(display.s);
+    free(skey);
+
+    return 0;
+
+clean_display:
+    free(display.s);
+clean_skey:
+    free(skey);
+
+    return 1;
+}
+
 static int reg_query(WCHAR *key_name, WCHAR *value_name, BOOL value_empty,
     BOOL subkey)
 {
-    static const WCHAR ff[] = {'%', 's', '\n', 0};
-    static WCHAR empty_line[] = {'\n', 0};
     static WCHAR not_implemented[] = {'S', 'u', 'p', 'p', 'o', 'r', 't', ' ',
 	    'f', 'o', 'r', ' ', 'v', 'a', 'l', 'u', 'e', ' ', 'n', 'o', 't',
 	    ' ', 'i', 'm', 'p', 'l', 'e', 'm', 'e', 'n', 't', 'e', 'd', ' ',
@@ -492,9 +609,6 @@ static int reg_query(WCHAR *key_name, WCHAR *value_name, BOOL value_empty,
     HKEY hkey;
     LONG st;
     WCHAR *p;
-    WCHAR skey[255];
-    DWORD skey_sz = sizeof(skey);
-    DisplayString display;
 
     if (value_name != NULL) {
         reg_printfW(not_implemented);
@@ -511,41 +625,17 @@ static int reg_query(WCHAR *key_name, WCHAR *value_name, BOOL value_empty,
 
     st = RegOpenKeyExW(root, p, 0, KEY_READ, &hkey);
     if (st == ERROR_SUCCESS) {
-        int i = 0;
-        st = RegEnumKeyExW(hkey, i, skey, &skey_sz, NULL,
-                NULL, NULL, NULL);
-
-        if(create_base_string(&display, root, p, skey)) {
+        st = print_skeys(root, p, hkey);
+        if (st) {
             goto close_key;
-        }
-
-        if (st == ERROR_SUCCESS) {
-            reg_printfW(empty_line);
-            do {
-                reg_printfW(ff, display.s);
-
-                i += 1;
-                skey_sz = 255;
-                st = RegEnumKeyExW(hkey, i, skey, &skey_sz, NULL,
-                        NULL, NULL, NULL);
-                if (resize_display(&display, skey)) {
-                    goto clean_display;
-                }
-
-            } while(st != ERROR_NO_MORE_ITEMS);
-        } else {
-            goto clean_display;
         }
     } else {
         return 1;
     }
-    free(display.s);
     RegCloseKey(hkey);
 
     return 0;
 
-clean_display:
-    free(display.s);
 close_key:
     RegCloseKey(hkey);
     return 1;
