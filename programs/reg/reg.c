@@ -598,22 +598,51 @@ clean_skey:
     return 1;
 }
 
+static int query_single_value(HKEY root, WCHAR* p, HKEY hkey,
+        const WCHAR* value_name)
+{
+    static WCHAR ff[] = {'%', 's', '\n', 0};
+    DisplayString display;
+    static WCHAR empty_line[] = {'\n', 0};
+    DWORD st;
+
+    reg_printfW(empty_line);
+
+    st = RegQueryValueExW(hkey, value_name, NULL, NULL, NULL, NULL);
+    if (st != ERROR_SUCCESS) {
+        /* printed here for compatibility with windows reg.exe */
+        reg_printfW(empty_line);
+        return 1;
+    }
+
+    st = create_base_string(&display, root, p, strlenW(value_name));
+    if(st) {
+        return 1;
+    }
+
+    display.s[display.base_sz-1] = '\0';
+    reg_printfW(ff, display.s);
+    display.s[display.base_sz-1] = '\\';
+
+    st = print_key_value(hkey, value_name);
+    if (st) {
+        goto clean_display;
+    }
+    reg_printfW(empty_line);
+    free(display.s);
+    return 0;
+
+clean_display:
+    free(display.s);
+    return 1;
+}
 static int reg_query(WCHAR *key_name, WCHAR *value_name, BOOL value_empty,
     BOOL subkey)
 {
-    static WCHAR not_implemented[] = {'S', 'u', 'p', 'p', 'o', 'r', 't', ' ',
-	    'f', 'o', 'r', ' ', 'v', 'a', 'l', 'u', 'e', ' ', 'n', 'o', 't',
-	    ' ', 'i', 'm', 'p', 'l', 'e', 'm', 'e', 'n', 't', 'e', 'd', ' ',
-	    'y', 'e', 't', '\n', 0};
     HKEY root;
     HKEY hkey;
     LONG st;
     WCHAR *p;
-
-    if (value_name != NULL) {
-        reg_printfW(not_implemented);
-        return 1;
-    }
 
     p = strchrW(key_name, '\\');
     root = get_rootkey(key_name);
@@ -625,9 +654,13 @@ static int reg_query(WCHAR *key_name, WCHAR *value_name, BOOL value_empty,
 
     st = RegOpenKeyExW(root, p, 0, KEY_READ, &hkey);
     if (st == ERROR_SUCCESS) {
-        st = print_skeys(root, p, hkey);
-        if (st) {
-            goto close_key;
+        if (value_name == NULL) {
+            st = print_skeys(root, p, hkey);
+            if (st) {
+                goto close_key;
+            }
+        } else {
+            st = query_single_value(root, p, hkey, value_name);
         }
     } else {
         return 1;
